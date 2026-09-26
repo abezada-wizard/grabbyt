@@ -45,10 +45,16 @@ if [ ! -f Resources/AppIcon.icns ]; then
 fi
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-echo "▸ Firmando (ad-hoc)…"
 xattr -cr "$APP"
-codesign --force --deep --sign - "$APP"
-codesign --verify "$APP"
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  # Developer ID + hardened runtime: requisito para notarizar (sin avisos de Gatekeeper).
+  echo "▸ Firmando con $SIGN_IDENTITY…"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+else
+  echo "▸ Firmando (ad-hoc)…"
+  codesign --force --deep --sign - "$APP"
+fi
+codesign --verify --strict "$APP"
 
 rm -rf build/Grabbyt.app
 ditto "$APP" build/Grabbyt.app
@@ -63,6 +69,9 @@ if [ "$DMG" = 1 ]; then
   OUT="build/Grabbyt-$VERSION.dmg"
   rm -f "$OUT"
   hdiutil create -volname "Grabbyt" -srcfolder "$DMG_DIR" -ov -format UDZO "$STAGE/Grabbyt.dmg" >/dev/null
+  if [ -n "${SIGN_IDENTITY:-}" ]; then
+    codesign --force --timestamp --sign "$SIGN_IDENTITY" "$STAGE/Grabbyt.dmg"
+  fi
   cp "$STAGE/Grabbyt.dmg" "$OUT"
   echo "✔ $OUT"
 fi

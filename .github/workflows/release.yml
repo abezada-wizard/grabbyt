@@ -1,6 +1,15 @@
 name: Release
 
 # Publica una versión: git tag v0.3.0 && git push origin v0.3.0
+#
+# Firma y notarización (opcional, elimina el aviso de macOS al abrir la app):
+# agrega estos secretos en Settings → Secrets and variables → Actions:
+#   MACOS_CERTIFICATE       certificado "Developer ID Application" exportado como .p12, en base64
+#   MACOS_CERTIFICATE_PWD   contraseña del .p12
+#   APPLE_ID                email de tu cuenta Apple Developer
+#   APPLE_TEAM_ID           Team ID (developer.apple.com → Membership)
+#   APPLE_APP_PASSWORD      contraseña de app creada en appleid.apple.com
+# Sin esos secretos la app se publica con firma ad-hoc, como antes.
 on:
   push:
     tags: ["v*"]
@@ -11,23 +20,52 @@ permissions:
 jobs:
   release:
     runs-on: macos-15   # Apple Silicon
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v5
+
       - name: Autopruebas
         run: swift run SelfTest
+
+      - name: Importar certificado Developer ID
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PWD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)"/\1/')"
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
       - name: Armar Grabbyt.app y DMG
         env:
           GRABBYT_VERSION: ${{ github.ref_name }}
           GRABBYT_REPOSITORY: ${{ github.repository }}
         run: ./scripts/build-app.sh --dmg
+
+      - name: Notarizar
+        if: env.SIGN_IDENTITY != '' && env.APPLE_ID != ''
+        run: ./scripts/notarize.sh "build/Grabbyt-${GITHUB_REF_NAME#v}.dmg"
+
       - name: Crear Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          if [ -n "${SIGN_IDENTITY:-}" ]; then NOTES=release-notes-signed.md; else NOTES=release-notes.md; fi
           cd build && ditto -c -k --keepParent Grabbyt.app "Grabbyt-$VERSION.zip"
           gh release create "$GITHUB_REF_NAME" \
             "Grabbyt-$VERSION.dmg" "Grabbyt-$VERSION.zip" \
             --title "Grabbyt $VERSION" \
             --generate-notes \
-            --notes-file ../.github/release-notes.md
+            --notes-file "../.github/$NOTES"

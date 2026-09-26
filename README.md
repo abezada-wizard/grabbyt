@@ -7,11 +7,12 @@ Descargador de videos, audio e imágenes para macOS (Apple Silicon). Pegas un li
 👉 **[Última versión (DMG)](../../releases/latest)**
 
 1. Abre el DMG y arrastra **Grabbyt** a **Aplicaciones**.
-2. La primera vez, macOS avisará que no puede verificar al desarrollador, porque la app no está notarizada por Apple. Para abrirla, ve a **Ajustes del Sistema → Privacidad y seguridad → “Abrir igualmente”**, o ejecuta en Terminal:
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/Grabbyt.app
-   ```
-3. Al abrirla por primera vez descarga sus herramientas (~150 MB): yt-dlp, ffmpeg y gallery-dl.
+2. Abre Grabbyt. Como la app aún no está notarizada por Apple, la primera vez macOS la bloquea:
+   - En el aviso, pulsa **Listo**.
+   - Abre **Ajustes del Sistema → Privacidad y seguridad**, baja hasta el final y pulsa **Abrir igualmente** junto a “Grabbyt”.
+   - Confirma con tu contraseña. Solo se hace una vez.
+
+La primera vez que se abre, Grabbyt prepara solo sus herramientas (yt-dlp, ffmpeg y gallery-dl). Tarda un minuto y no hay que hacer nada.
 
 Requiere macOS 14 o superior en un Mac M1 o posterior. La app avisa cuando hay una versión nueva.
 
@@ -86,6 +87,8 @@ git tag v0.3.0 && git push origin v0.3.0
 ```
 
 GitHub Actions (`.github/workflows/release.yml`) corre las pruebas, arma el DMG y crea la Release. Las apps ya instaladas ven el aviso de actualización.
+
+**Firma y notarización (opcional):** si agregas los secretos de Apple Developer que se indican al inicio de `release.yml`, el workflow firma la app con Developer ID, la notariza con Apple y usa unas notas de instalación sin el paso de “Abrir igualmente”. Sin esos secretos se publica con firma ad-hoc.
 
 ## Aviso
 
