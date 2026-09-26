@@ -211,8 +211,8 @@ public struct AttemptPlanner: Sendable {
             [.update, .cookies]   // a veces "no existe" = hace falta sesión o el extractor está viejo
         case .unknown:
             [.singleFile, .update, .impersonate, .cookies, .nextCookies]
-        case .geoBlocked, .unsupportedURL:
-            []
+        case .geoBlocked, .unsupportedURL, .imagesOnly:
+            []   // imagesOnly lo resuelve la etapa de imágenes del post
         }
     }
 

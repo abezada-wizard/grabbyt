@@ -7,6 +7,8 @@ public struct DownloadRequest: Sendable {
     public var audioFormat: AudioFormat
     public var destination: URL
     public var preferredBrowser: Browser?
+    /// Argumentos extra para yt-dlp (p. ej. --ignore-no-formats-error en carruseles mixtos).
+    public var extraYtDlpArgs: [String] = []
 
     public init(url: String, mode: MediaMode, quality: VideoQuality = .best, audioFormat: AudioFormat = .mp3,
                 destination: URL, preferredBrowser: Browser?) {
@@ -60,7 +62,7 @@ public final class DownloadEngine: @unchecked Sendable {
     }
 
     public enum Stage: String {
-        case ytdlp, twitter, galleryDL, direct, html, webview
+        case ytdlp, postImages, twitter, galleryDL, direct, html, webview
     }
 
     private enum StageResult {
@@ -75,13 +77,13 @@ public final class DownloadEngine: @unchecked Sendable {
         var list: [Stage]
         switch request.mode {
         case .images:
-            list = [.twitter, .galleryDL, .html, .ytdlp, .webview]
+            list = [.twitter, .postImages, .galleryDL, .html, .ytdlp, .webview]
         case .audio:
             list = [.ytdlp, .twitter, .direct, .html, .webview]
         case .video:
             list = DirectDownloader.looksLikeFile(request.url)
                 ? [.direct, .ytdlp, .html, .webview]
-                : [.ytdlp, .twitter, .galleryDL, .direct, .html, .webview]
+                : [.ytdlp, .twitter, .postImages, .galleryDL, .direct, .html, .webview]
         }
         if !isTweet { list.removeAll { $0 == .twitter } }
         return list
@@ -98,6 +100,7 @@ public final class DownloadEngine: @unchecked Sendable {
             let result: StageResult
             switch stage {
             case .ytdlp: result = await runYtDlpChain(request, onEvent: onEvent)
+            case .postImages: result = await runPostImages(request, onEvent: onEvent)
             case .twitter: result = await runTwitter(request, onEvent: onEvent)
             case .galleryDL: result = await runGalleryDL(request, onEvent: onEvent)
             case .direct: result = await runDirect(request, onEvent: onEvent)
@@ -121,7 +124,7 @@ public final class DownloadEngine: @unchecked Sendable {
         if isCancelled { return .cancelled }
         let (kind, message) = ytFailure ?? lastFailure
         var text = message ?? kind.userMessage
-        if request.mode == .video, kind == .noMedia || kind == .unsupportedURL {
+        if request.mode == .video, kind == .noMedia || kind == .unsupportedURL || kind == .imagesOnly {
             text += "\nSi es un post de fotos, prueba el modo Imágenes."
         }
         return .failure(kind: kind, message: text)
@@ -130,6 +133,7 @@ public final class DownloadEngine: @unchecked Sendable {
     static func stageName(_ stage: Stage) -> String {
         switch stage {
         case .ytdlp: "yt-dlp"
+        case .postImages: "imágenes del post (yt-dlp)"
         case .twitter: "API de fxtwitter/vxtwitter"
         case .galleryDL: "gallery-dl (imágenes y galerías)"
         case .direct: "descarga directa"
@@ -213,6 +217,55 @@ public final class DownloadEngine: @unchecked Sendable {
             }
             config = next
         }
+    }
+
+    // MARK: - Etapa: imágenes del post (metadatos de yt-dlp)
+
+    private func runPostImages(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> StageResult {
+        guard let ytdlp = await tools.path(for: .ytdlp) else { return .failed(.unsupportedURL, nil) }
+        var cookieOptions: [Browser?] = [nil]
+        if let browser = request.preferredBrowser ?? Browser.withReadableCookies().first { cookieOptions.append(browser) }
+
+        for cookies in cookieOptions {
+            if isCancelled { return .cancelled }
+            onEvent(.status(cookies == nil ? "Buscando las imágenes del post…" : "Buscando imágenes con cookies de \(cookies!.displayName)…"))
+            var args = ["-J", "--no-warnings", "--ignore-no-formats-error", "--socket-timeout", "20"]
+            if let cookies { args += ["--cookies-from-browser", cookies.rawValue] }
+            args += ["--", request.url]
+            let result = await runProcess(ytdlp, args)
+            if result.wasCancelled { return .cancelled }
+            guard result.exitCode == 0,
+                  let line = result.output.split(whereSeparator: \.isNewline).first(where: { $0.hasPrefix("{") }),
+                  let parsed = PostImages.parse(json: Data(line.utf8)) else {
+                if ErrorClassifier.classify(result.output) == .loginRequired { continue }
+                return .failed(.noMedia, nil)
+            }
+
+            var files: [URL] = []
+            let many = parsed.images.count > 1
+            for (i, item) in parsed.images.enumerated() {
+                if isCancelled { return .cancelled }
+                onEvent(.status("Descargando imagen \(i + 1)/\(parsed.images.count)…"))
+                onEvent(.progress(fraction: Double(i) / Double(max(parsed.images.count, 1)), speed: nil, eta: nil))
+                let ext = ["jpg", "jpeg", "png", "webp", "heic"].contains(item.url.pathExtension.lowercased()) ? item.url.pathExtension : "jpg"
+                let name = "\(parsed.owner) - \(item.id)\(many ? " \(i + 1)" : "").\(ext)"
+                if let file = try? await DirectDownloader.download(item.url, to: request.destination, preferredName: name, onProgress: { _ in }) {
+                    files.append(file)
+                }
+            }
+
+            // Carrusel mixto en modo Imágenes: bajar también los videos.
+            if request.mode == .images, parsed.videoCount > 0 {
+                onEvent(.status("Descargando \(parsed.videoCount) video(s) del post…"))
+                var videoRequest = request
+                videoRequest.mode = .video
+                videoRequest.extraYtDlpArgs = ["--ignore-no-formats-error"]
+                if case .success(let videos) = await runYtDlpChain(videoRequest, onEvent: onEvent) { files += videos }
+            }
+            if !files.isEmpty { return .success(files) }
+            if parsed.images.isEmpty && parsed.videoCount == 0 { return .failed(.noMedia, nil) }
+        }
+        return .failed(.imagesOnly, nil)
     }
 
     // MARK: - Etapa: X/Twitter

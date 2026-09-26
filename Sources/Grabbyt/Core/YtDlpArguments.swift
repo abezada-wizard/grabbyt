@@ -49,6 +49,7 @@ public enum YtDlpArguments {
         if config.impersonate { args += ["--impersonate", "chrome"] }
         if config.altClient { args += ["--extractor-args", "youtube:player_client=tv,web_safari,mweb,android_vr"] }
 
+        args += request.extraYtDlpArgs
         args += ["--", request.url]
         return args
     }

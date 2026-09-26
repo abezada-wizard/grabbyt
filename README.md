@@ -50,12 +50,13 @@ Grabbyt no se rinde al primer error. Cada fallo se clasifica y se elige el sigui
 **2. Si yt-dlp no puede, se prueban, en orden:**
 
 1. **API de fxtwitter / vxtwitter** para X/Twitter: tweets sensibles sin sesión, y fotos.
-2. **gallery-dl** para imágenes, galerías y carruseles.
-3. **Descarga directa**, si el link apunta a un archivo (`.mp4`, `.jpg`, `.pdf`…) o a un stream `.m3u8`, que se baja con ffmpeg.
-4. **Lectura del HTML**: `og:video`, `<video>`, JSON-LD y cualquier `.m3u8`/`.mp4` en el código.
-5. **Navegador invisible (WebKit)**: abre la página, reproduce el video en silencio y captura las URLs de medios que pide el reproductor.
+2. **Imágenes del post vía yt-dlp**: fotos y carruseles de Instagram a resolución completa, sin iniciar sesión.
+3. **gallery-dl** para imágenes, galerías y carruseles.
+4. **Descarga directa**, si el link apunta a un archivo (`.mp4`, `.jpg`, `.pdf`…) o a un stream `.m3u8`, que se baja con ffmpeg.
+5. **Lectura del HTML**: `og:video`, `<video>`, JSON-LD y cualquier `.m3u8`/`.mp4` en el código.
+6. **Navegador invisible (WebKit)**: abre la página, reproduce el video en silencio y captura las URLs de medios que pide el reproductor.
 
-En modo **Imágenes**, el orden cambia: primero gallery-dl y las APIs.
+En modo **Imágenes**, el orden cambia: primero las imágenes del post, las APIs y gallery-dl. En modo Video, si un post solo tiene fotos, Grabbyt las baja igual.
 
 Las herramientas se actualizan solas: yt-dlp a diario, y también cuando un extractor falla; gallery-dl semanalmente.
 Para usar cookies de Safari, dale a Grabbyt **Acceso total al disco** en Ajustes del Sistema → Privacidad.

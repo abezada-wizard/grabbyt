@@ -12,6 +12,7 @@ public enum FailureKind: String, Sendable, CaseIterable {
     case notFound
     case unsupportedURL
     case noMedia
+    case imagesOnly
     case extractorBroken
     case network
     case unknown
@@ -29,6 +30,7 @@ public enum FailureKind: String, Sendable, CaseIterable {
         case .notFound: "El contenido no existe o fue eliminado."
         case .unsupportedURL: "Este sitio aún no está soportado por yt-dlp."
         case .noMedia: "No se encontró video en ese link (puede que solo tenga imágenes o texto)."
+        case .imagesOnly: "Ese post solo tiene imágenes y no se pudieron bajar."
         case .extractorBroken: "El extractor de este sitio parece roto, incluso tras actualizar yt-dlp."
         case .network: "Problema de red. Revisa tu conexión."
         case .unknown: "Error desconocido. Revisa el registro para más detalles."
@@ -63,9 +65,10 @@ public enum ErrorClassifier {
             "anti-bot", "blocked", "access denied",
         ]),
         (.unsupportedURL, ["unsupported url"]),
+        (.imagesOnly, ["no video formats found"]),   // p. ej. posts de fotos de Instagram
         (.noMedia, [
             "no video could be found", "there's no video", "no video in this", "no media found",
-            "no video formats found", "does not contain a video", "no formats found",
+            "does not contain a video", "no formats found",
         ]),
         (.notFound, [
             "http error 404", "does not exist", "video unavailable", "video is unavailable", "is not available", "this content isn't available", "has been removed", "tweet is unavailable",

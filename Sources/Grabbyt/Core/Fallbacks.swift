@@ -213,3 +213,39 @@ public enum HTMLScraper {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+
+// MARK: - Imágenes de un post vía metadatos de yt-dlp
+
+/// Instagram (y otros) exponen las fotos de un post como "thumbnail" de cada elemento, aunque no tengan video.
+/// `yt-dlp -J --ignore-no-formats-error` las entrega sin iniciar sesión, a resolución completa.
+public enum PostImages {
+    public struct Item: Equatable, Sendable {
+        public var id: String
+        public var url: URL
+    }
+
+    public struct Parsed: Equatable, Sendable {
+        public var owner: String
+        public var images: [Item]
+        public var videoCount: Int
+    }
+
+    public static func parse(json data: Data) -> Parsed? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let entries: [[String: Any]] = (root["entries"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? [root]
+        let owner = (root["uploader"] as? String) ?? (root["channel"] as? String)
+            ?? (entries.first?["uploader"] as? String) ?? (root["uploader_id"] as? String) ?? "post"
+        var images: [Item] = []
+        var videos = 0
+        for (index, entry) in entries.enumerated() {
+            let formats = entry["formats"] as? [[String: Any]] ?? []
+            let hasVideo = formats.contains { ($0["vcodec"] as? String) != "none" && $0["url"] != nil }
+            if hasVideo { videos += 1; continue }
+            let thumb = (entry["thumbnail"] as? String)
+                ?? ((entry["thumbnails"] as? [[String: Any]])?.last?["url"] as? String)
+            guard let s = thumb, let url = URL(string: s) else { continue }
+            images.append(Item(id: (entry["id"] as? String) ?? "\(index + 1)", url: url))
+        }
+        return Parsed(owner: owner, images: images, videoCount: videos)
+    }
+}

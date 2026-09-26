@@ -23,6 +23,7 @@ struct ErrorClassifierTests {
             ("ERROR: [youtube] aaaaaaaaaaa: This video is unavailable", .notFound),
             ("ERROR: [twitter] 2091402173473050732: Video #1 is unavailable", .loginRequired),
             ("ERROR: [twitter] 1: This tweet is unavailable", .notFound),
+            ("ERROR: [Instagram] DdtyDIZRp4l: No video formats found!; please report this issue", .imagesOnly),
             ("ERROR: [youtube] x: The uploader has not made this video available in your country", .geoBlocked),
             ("ERROR: Unable to download webpage: <urlopen error [Errno 8] nodename nor servname provided>", .network),
             ("ERROR: something totally new", .unknown),
@@ -125,9 +126,9 @@ struct ParsingTests {
         expect(preview.qualities == [.best, .p1080, .p720, .p360], "\(preview.qualities)")
         let dest = URL(fileURLWithPath: "/tmp")
         expect(DownloadEngine.stages(for: DownloadRequest(url: "https://x.com/a/status/1", mode: .video, destination: dest, preferredBrowser: nil)).map(\.rawValue)
-               == ["ytdlp", "twitter", "galleryDL", "direct", "html", "webview"])
+               == ["ytdlp", "twitter", "postImages", "galleryDL", "direct", "html", "webview"])
         expect(DownloadEngine.stages(for: DownloadRequest(url: "https://a.com/v.mp4", mode: .video, destination: dest, preferredBrowser: nil)).first == .direct)
-        expect(DownloadEngine.stages(for: DownloadRequest(url: "https://instagram.com/p/x", mode: .images, destination: dest, preferredBrowser: nil)).first == .galleryDL)
+        expect(DownloadEngine.stages(for: DownloadRequest(url: "https://instagram.com/p/x", mode: .images, destination: dest, preferredBrowser: nil)).first == .postImages)
         let args = YtDlpArguments.build(request: DownloadRequest(url: "u", mode: .video, quality: .p720, destination: dest, preferredBrowser: nil),
                                         config: AttemptConfig(mergeFormats: true), ffmpegDir: nil)
         expect(args.contains("bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"))
@@ -141,6 +142,15 @@ struct ParsingTests {
         let c = p.first(hasFfmpeg: true)
         let n = p.next(after: .loginRequired, previous: c, canUpdate: true)!
         expect(n.altClient)
+    }
+
+    func testPostImages() {
+        let json = #"{"_type":"playlist","uploader":"ana","entries":[{"id":"a","formats":[],"thumbnail":"https://cdn/x/1.jpg"},{"id":"b","formats":[{"vcodec":"h264","url":"https://cdn/v.mp4"}],"thumbnail":"https://cdn/t.jpg"},{"id":"c","thumbnails":[{"url":"https://cdn/small.jpg"},{"url":"https://cdn/big.jpg"}]}]}"#
+        let p = PostImages.parse(json: Data(json.utf8))
+        expect(p?.owner == "ana")
+        expect(p?.images.map(\.id) == ["a", "c"], "\(String(describing: p))")
+        expect(p?.images.last?.url.absoluteString == "https://cdn/big.jpg")
+        expect(p?.videoCount == 1)
     }
 
     func testLinkParser() {
@@ -220,6 +230,7 @@ AttemptPlannerTests().testAlwaysTerminates()
 ParsingTests().testProgressLine()
 ParsingTests().testLinkParser()
 ParsingTests().testTweetID()
+ParsingTests().testPostImages()
 ParsingTests().testHTMLScraper()
 ParsingTests().testQualitiesAndStages()
 ParsingTests().testYouTubeAltClient()
