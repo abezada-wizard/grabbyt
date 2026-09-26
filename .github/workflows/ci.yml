@@ -1,0 +1,18 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15   # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar
+        run: swift build
+      - name: Autopruebas
+        run: swift run SelfTest
+      - name: Armar Grabbyt.app
+        run: ./scripts/build-app.sh

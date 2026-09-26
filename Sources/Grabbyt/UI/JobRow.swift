@@ -17,7 +17,7 @@ struct JobRow: View {
                     Text(job.displayTitle)
                         .font(.headline)
                         .lineLimit(2)
-                    Text(LinkParser.siteName(for: job.url) + (job.mode == .audio ? " · audio" : ""))
+                    Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -65,6 +65,7 @@ struct JobRow: View {
     @ViewBuilder
     private var icon: some View {
         switch job.state {
+        case .queued: Image(systemName: "clock").foregroundStyle(.secondary)
         case .running: Image(systemName: "arrow.down.circle").foregroundStyle(.blue)
         case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
         case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
@@ -75,7 +76,7 @@ struct JobRow: View {
     @ViewBuilder
     private var actions: some View {
         switch job.state {
-        case .running:
+        case .queued, .running:
             Button { job.cancel() } label: { Image(systemName: "xmark.circle") }
                 .buttonStyle(.borderless)
                 .help("Cancelar")
@@ -97,6 +98,8 @@ struct JobRow: View {
 
     private var statusLine: String {
         switch job.state {
+        case .queued:
+            return "En cola…"
         case .running:
             var parts = [job.status]
             if let f = job.fraction { parts.append(String(format: "%.0f%%", f * 100)) }
@@ -106,12 +109,24 @@ struct JobRow: View {
         case .done(let files):
             let names = files.map(\.lastPathComponent).joined(separator: ", ")
             let via = job.attempts.count > 1 ? " (tras \(job.attempts.count) intentos)" : ""
+            if files.count > 3 { return "\(files.count) archivos" + via }
             return (names.isEmpty ? job.status : names) + via
         case .failed(let message):
             return message
         case .cancelled:
             return "Cancelado"
         }
+    }
+
+    private var subtitle: String {
+        var parts = [LinkParser.siteName(for: job.url)]
+        switch job.options.mode {
+        case .audio: parts.append(job.options.audioFormat.rawValue.uppercased())
+        case .images: parts.append("imágenes")
+        case .video: if job.options.quality != .best { parts.append(job.options.quality.label) }
+        }
+        parts.append(job.createdAt.formatted(date: .abbreviated, time: .shortened))
+        return parts.joined(separator: " · ")
     }
 
     private var statusColor: Color {

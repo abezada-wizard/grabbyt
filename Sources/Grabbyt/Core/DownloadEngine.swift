@@ -3,12 +3,17 @@ import Foundation
 public struct DownloadRequest: Sendable {
     public var url: String
     public var mode: MediaMode
+    public var quality: VideoQuality
+    public var audioFormat: AudioFormat
     public var destination: URL
     public var preferredBrowser: Browser?
 
-    public init(url: String, mode: MediaMode, destination: URL, preferredBrowser: Browser?) {
+    public init(url: String, mode: MediaMode, quality: VideoQuality = .best, audioFormat: AudioFormat = .mp3,
+                destination: URL, preferredBrowser: Browser?) {
         self.url = url
         self.mode = mode
+        self.quality = quality
+        self.audioFormat = audioFormat
         self.destination = destination
         self.preferredBrowser = preferredBrowser
     }
@@ -30,7 +35,8 @@ public enum DownloadOutcome: Sendable {
     case cancelled
 }
 
-/// Corre yt-dlp con la cadena de fallbacks hasta que un intento funcione.
+/// Orquesta todas las estrategias: yt-dlp (con su propia cadena de reintentos) y, si falla,
+/// APIs específicas, gallery-dl, descarga directa, lectura del HTML y WebKit.
 public final class DownloadEngine: @unchecked Sendable {
     private let tools: ToolManager
     private let lock = NSLock()
@@ -42,26 +48,109 @@ public final class DownloadEngine: @unchecked Sendable {
     }
 
     public func cancel() {
-        lock.lock()
-        cancelled = true
-        let runner = currentRunner
-        lock.unlock()
+        let runner: ProcessRunner? = lock.withLock {
+            cancelled = true
+            return currentRunner
+        }
         runner?.cancel()
     }
 
     private var isCancelled: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return cancelled || Task.isCancelled
+        lock.withLock { cancelled } || Task.isCancelled
+    }
+
+    public enum Stage: String {
+        case ytdlp, twitter, galleryDL, direct, html, webview
+    }
+
+    private enum StageResult {
+        case success([URL])
+        case failed(FailureKind, String?)
+        case cancelled
+    }
+
+    /// Orden de etapas según el modo y el tipo de link.
+    public static func stages(for request: DownloadRequest) -> [Stage] {
+        let isTweet = TwitterFallback.tweetID(from: request.url) != nil
+        var list: [Stage]
+        switch request.mode {
+        case .images:
+            list = [.twitter, .galleryDL, .html, .ytdlp, .webview]
+        case .audio:
+            list = [.ytdlp, .twitter, .direct, .html, .webview]
+        case .video:
+            list = DirectDownloader.looksLikeFile(request.url)
+                ? [.direct, .ytdlp, .html, .webview]
+                : [.ytdlp, .twitter, .galleryDL, .direct, .html, .webview]
+        }
+        if !isTweet { list.removeAll { $0 == .twitter } }
+        return list
     }
 
     public func run(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> DownloadOutcome {
-        guard await tools.path(for: .ytdlp) != nil else {
-            return .failure(kind: .unknown, message: "yt-dlp no está instalado. Ábrelo en Ajustes → Herramientas.")
-        }
         try? FileManager.default.createDirectory(at: request.destination, withIntermediateDirectories: true)
+        var ytFailure: (FailureKind, String?)?
+        var lastFailure: (FailureKind, String?) = (.noMedia, nil)
 
+        for stage in Self.stages(for: request) {
+            if isCancelled { return .cancelled }
+            if stage != .ytdlp { onEvent(.fallback(Self.stageName(stage))) }
+            let result: StageResult
+            switch stage {
+            case .ytdlp: result = await runYtDlpChain(request, onEvent: onEvent)
+            case .twitter: result = await runTwitter(request, onEvent: onEvent)
+            case .galleryDL: result = await runGalleryDL(request, onEvent: onEvent)
+            case .direct: result = await runDirect(request, onEvent: onEvent)
+            case .html: result = await runHTML(request, onEvent: onEvent)
+            case .webview: result = await runWebView(request, onEvent: onEvent)
+            }
+            switch result {
+            case .success(let files): return .success(files: files)
+            case .cancelled: return .cancelled
+            case .failed(let kind, let message):
+                if stage == .ytdlp {
+                    ytFailure = (kind, message)
+                    // Estos fallos no los arregla ninguna otra estrategia.
+                    if kind == .geoBlocked || kind == .network { return .failure(kind: kind, message: message ?? kind.userMessage) }
+                } else {
+                    onEvent(.attemptFailed(kind))
+                }
+                lastFailure = (kind, message)
+            }
+        }
+        if isCancelled { return .cancelled }
+        let (kind, message) = ytFailure ?? lastFailure
+        var text = message ?? kind.userMessage
+        if request.mode == .video, kind == .noMedia || kind == .unsupportedURL {
+            text += "\nSi es un post de fotos, prueba el modo Imágenes."
+        }
+        return .failure(kind: kind, message: text)
+    }
+
+    static func stageName(_ stage: Stage) -> String {
+        switch stage {
+        case .ytdlp: "yt-dlp"
+        case .twitter: "API de fxtwitter/vxtwitter"
+        case .galleryDL: "gallery-dl (imágenes y galerías)"
+        case .direct: "descarga directa"
+        case .html: "leer el HTML de la página"
+        case .webview: "navegador invisible (detectar video)"
+        }
+    }
+
+    // MARK: - Etapa: yt-dlp con su cadena de reintentos
+
+    private func runYtDlpChain(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> StageResult {
+        guard await tools.path(for: .ytdlp) != nil else {
+            return .failed(.unknown, "yt-dlp no está instalado. Ábrelo en Ajustes → Herramientas.")
+        }
         let hasFfmpeg = await tools.path(for: .ffmpeg) != nil
-        var planner = AttemptPlanner(installedBrowsers: Browser.withReadableCookies(), preferredBrowser: request.preferredBrowser)
+        let host = URL(string: request.url)?.host?.lowercased() ?? ""
+        var planner = AttemptPlanner(
+            installedBrowsers: Browser.withReadableCookies(),
+            preferredBrowser: request.preferredBrowser,
+            isYouTube: host.contains("youtube.com") || host.contains("youtu.be")
+        )
         var config = planner.first(hasFfmpeg: hasFfmpeg)
         var lastFailure = FailureKind.unknown
         var primaryFailure: FailureKind?   // el último fallo "real" (no de cookies), para el mensaje final
@@ -89,12 +178,12 @@ public final class DownloadEngine: @unchecked Sendable {
             // Con varios elementos (p. ej. un tweet con 2 videos) yt-dlp puede salir con error
             // aunque haya bajado algo: si hay archivos, cuenta como éxito.
             if !result.files.isEmpty {
-                return .success(files: result.files)
+                return .success(result.files)
             }
             if result.exitCode == 0 {
                 // yt-dlp dice OK pero no reportó archivo (p. ej. ya existía). Lo tratamos como éxito sin ruta.
                 if result.output.contains("has already been downloaded") {
-                    return .success(files: [])
+                    return .success([])
                 }
                 lastFailure = .noMedia
             } else {
@@ -112,10 +201,6 @@ public final class DownloadEngine: @unchecked Sendable {
             if lastFailure != .cookieFailure { primaryFailure = lastFailure }
 
             guard let next = planner.next(after: lastFailure, previous: config, canUpdate: true) else {
-                if lastFailure != .network, let files = await platformFallback(request, onEvent: onEvent) {
-                    return .success(files: files)
-                }
-                if isCancelled { return .cancelled }
                 let reported = primaryFailure ?? lastFailure
                 var message = reported.userMessage
                 if reported == .unknown, !lastErrorLine.isEmpty {
@@ -124,29 +209,180 @@ public final class DownloadEngine: @unchecked Sendable {
                 if reported == .loginRequired, planner.browsers.isEmpty {
                     message += "\nNo encontré cookies de ningún navegador: inicia sesión en Chrome/Firefox, o da a Grabbyt “Acceso total al disco” para usar Safari."
                 }
-                return .failure(kind: reported, message: message)
+                return .failed(reported, message)
             }
             config = next
         }
     }
 
-    // MARK: - Fallbacks por plataforma
+    // MARK: - Etapa: X/Twitter
 
-    /// Se prueba cuando yt-dlp ya agotó sus estrategias.
-    private func platformFallback(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> [URL]? {
-        guard let tweetID = TwitterFallback.tweetID(from: request.url) else { return nil }
-        onEvent(.fallback("API de fxtwitter/vxtwitter"))
+    private func runTwitter(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> StageResult {
+        guard let tweetID = TwitterFallback.tweetID(from: request.url) else { return .failed(.unsupportedURL, nil) }
         do {
             let files = try await TwitterFallback.download(
                 tweetID: tweetID, mode: request.mode, destination: request.destination,
                 ffmpeg: await tools.path(for: .ffmpeg)
             ) { onEvent(.status($0)) }
-            return files
+            return .success(files)
         } catch {
             onEvent(.log("fxtwitter: \(error.localizedDescription)"))
-            onEvent(.attemptFailed(.noMedia))
-            return nil
+            return .failed(.noMedia, nil)
         }
+    }
+
+    // MARK: - Etapa: gallery-dl
+
+    private func runGalleryDL(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> StageResult {
+        guard let gdl = await tools.path(for: .galleryDL) else {
+            onEvent(.log("gallery-dl no está instalado"))
+            return .failed(.unsupportedURL, nil)
+        }
+        let browsers = Browser.withReadableCookies()
+        var cookieOptions: [Browser?] = [nil]
+        if let preferred = request.preferredBrowser, browsers.contains(preferred) { cookieOptions.append(preferred) }
+        else if let first = browsers.first { cookieOptions.append(first) }
+
+        var lastKind = FailureKind.noMedia
+        for cookies in cookieOptions {
+            if isCancelled { return .cancelled }
+            onEvent(.status(cookies == nil ? "Buscando imágenes con gallery-dl…" : "gallery-dl con cookies de \(cookies!.displayName)…"))
+            let args = GalleryDL.arguments(url: request.url, destination: request.destination, cookies: cookies)
+            onEvent(.log("$ gallery-dl " + args.map(YtDlpArguments.shellQuote).joined(separator: " ")))
+            let files = FileCollector()
+            let result = await runProcess(gdl, args) { line in
+                if let file = GalleryDL.parseFile(line: line) {
+                    files.add(file)
+                    onEvent(.status("gallery-dl: \(files.urls.count) archivo(s)…"))
+                } else {
+                    onEvent(.log(line))
+                }
+            }
+            if result.wasCancelled { return .cancelled }
+            if !files.urls.isEmpty { return .success(files.urls) }
+            lastKind = ErrorClassifier.classify(result.output)
+            let lower = result.output.lowercased()
+            let needsLogin = lastKind == .loginRequired || lower.contains("401") || lower.contains("403") || lower.contains("login")
+            if !needsLogin { break }
+        }
+        return .failed(lastKind == .unknown ? .noMedia : lastKind, nil)
+    }
+
+    // MARK: - Etapa: descarga directa
+
+    private func runDirect(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> StageResult {
+        guard let url = URL(string: request.url) else { return .failed(.unsupportedURL, nil) }
+        if DirectDownloader.isStream(url) {
+            return await downloadCandidate(url, request: request, name: url.deletingPathExtension().lastPathComponent, referer: nil, onEvent: onEvent)
+        }
+        onEvent(.status("Comprobando si el link es un archivo…"))
+        guard await DirectDownloader.mediaContentType(of: url) != nil else { return .failed(.noMedia, nil) }
+        return await downloadCandidate(url, request: request, name: nil, referer: nil, onEvent: onEvent)
+    }
+
+    // MARK: - Etapa: HTML
+
+    private func runHTML(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> StageResult {
+        guard let url = URL(string: request.url) else { return .failed(.unsupportedURL, nil) }
+        onEvent(.status("Leyendo la página…"))
+        guard let found = try? await HTMLScraper.scrape(url) else { return .failed(.network, nil) }
+        if let title = found.title { onEvent(.title(title)) }
+        let name = found.title ?? url.host ?? "video"
+
+        if request.mode != .images {
+            for candidate in found.videos.prefix(5) {
+                if isCancelled { return .cancelled }
+                onEvent(.log("HTML → \(candidate.absoluteString)"))
+                if case .success(let files) = await downloadCandidate(candidate, request: request, name: name, referer: url.absoluteString, onEvent: onEvent) {
+                    return .success(files)
+                }
+            }
+            return .failed(.noMedia, nil)
+        }
+
+        var files: [URL] = []
+        for (i, image) in found.images.prefix(20).enumerated() {
+            if isCancelled { return .cancelled }
+            let ext = image.pathExtension.isEmpty ? "jpg" : image.pathExtension
+            if let file = try? await DirectDownloader.download(image, to: request.destination, preferredName: "\(name) \(i + 1).\(ext)", referer: url.absoluteString, onProgress: { _ in }) {
+                files.append(file)
+            }
+        }
+        return files.isEmpty ? .failed(.noMedia, nil) : .success(files)
+    }
+
+    // MARK: - Etapa: WebKit invisible
+
+    private func runWebView(_ request: DownloadRequest, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> StageResult {
+        guard let url = URL(string: request.url) else { return .failed(.unsupportedURL, nil) }
+        onEvent(.status("Abriendo la página en un navegador invisible…"))
+        let found = await WebSniffer.sniff(url)
+        if isCancelled { return .cancelled }
+        if let title = found.title, !title.isEmpty { onEvent(.title(title)) }
+        let name = (found.title?.isEmpty == false ? found.title : nil) ?? url.host ?? "video"
+        for candidate in found.media.prefix(4) {
+            onEvent(.log("WebKit → \(candidate.absoluteString)"))
+            if case .success(let files) = await downloadCandidate(candidate, request: request, name: name, referer: url.absoluteString, onEvent: onEvent) {
+                return .success(files)
+            }
+            if isCancelled { return .cancelled }
+        }
+        return .failed(.noMedia, nil)
+    }
+
+    // MARK: - Ayudantes de fallbacks
+
+    /// Baja una URL de medios (stream con ffmpeg o archivo directo) y la convierte a audio si hace falta.
+    private func downloadCandidate(_ url: URL, request: DownloadRequest, name: String?, referer: String?, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> StageResult {
+        let ffmpeg = await tools.path(for: .ffmpeg)
+        do {
+            if DirectDownloader.isStream(url) {
+                guard let ffmpeg else { return .failed(.ffmpegMissing, nil) }
+                onEvent(.status("Descargando stream con ffmpeg…"))
+                onEvent(.progress(fraction: nil, speed: nil, eta: nil))
+                let runner = ProcessRunner()
+                lock.withLock { currentRunner = runner }
+                defer { lock.withLock { currentRunner = nil } }
+                let file = try await StreamDownloader.download(
+                    url, to: request.destination, name: name ?? "video", mode: request.mode,
+                    audioFormat: request.audioFormat, referer: referer, ffmpeg: ffmpeg, runner: runner)
+                return .success([file])
+            }
+            onEvent(.status("Descargando archivo…"))
+            let preferred = name.map { n in
+                let ext = url.pathExtension.isEmpty ? "mp4" : url.pathExtension
+                return "\(n).\(ext)"
+            }
+            var file = try await DirectDownloader.download(url, to: request.destination, preferredName: preferred, referer: referer) { fraction in
+                onEvent(.progress(fraction: fraction, speed: nil, eta: nil))
+            }
+            if request.mode == .audio, let ffmpeg, !["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus"].contains(file.pathExtension.lowercased()) {
+                file = await extractAudio(file, format: request.audioFormat, ffmpeg: ffmpeg, onEvent: onEvent)
+            }
+            return .success([file])
+        } catch {
+            if isCancelled { return .cancelled }
+            onEvent(.log("\(url.lastPathComponent): \(error.localizedDescription)"))
+            return .failed(.noMedia, nil)
+        }
+    }
+
+    private func extractAudio(_ file: URL, format: AudioFormat, ffmpeg: URL, onEvent: @escaping @Sendable (DownloadEvent) -> Void) async -> URL {
+        onEvent(.status("Extrayendo audio…"))
+        let out = DirectDownloader.uniqueURL(in: file.deletingLastPathComponent(), name: file.deletingPathExtension().lastPathComponent + "." + format.rawValue)
+        let codec = format == .mp3 ? ["-q:a", "0"] : ["-c:a", "aac", "-b:a", "192k"]
+        let result = await runProcess(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-i", file.path, "-vn"] + codec + [out.path])
+        guard result.exitCode == 0 else { return file }
+        try? FileManager.default.removeItem(at: file)
+        return out
+    }
+
+    private func runProcess(_ exe: URL, _ args: [String], onLine: @escaping @Sendable (String) -> Void = { _ in }) async -> ProcessRunner.Result {
+        let runner = ProcessRunner()
+        lock.withLock { currentRunner = runner }
+        defer { lock.withLock { currentRunner = nil } }
+        if isCancelled { return ProcessRunner.Result(exitCode: -1, output: "", wasCancelled: true) }
+        return await runner.run(executable: exe, arguments: args, onLine: onLine)
     }
 
     // MARK: - yt-dlp

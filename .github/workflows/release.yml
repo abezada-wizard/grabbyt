@@ -1,0 +1,33 @@
+name: Release
+
+# Publica una versión: git tag v0.3.0 && git push origin v0.3.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15   # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - name: Autopruebas
+        run: swift run SelfTest
+      - name: Armar Grabbyt.app y DMG
+        env:
+          GRABBYT_VERSION: ${{ github.ref_name }}
+          GRABBYT_REPOSITORY: ${{ github.repository }}
+        run: ./scripts/build-app.sh --dmg
+      - name: Crear Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd build && ditto -c -k --keepParent Grabbyt.app "Grabbyt-$VERSION.zip"
+          gh release create "$GITHUB_REF_NAME" \
+            "Grabbyt-$VERSION.dmg" "Grabbyt-$VERSION.zip" \
+            --title "Grabbyt $VERSION" \
+            --generate-notes \
+            --notes-file ../.github/release-notes.md

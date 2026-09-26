@@ -4,6 +4,12 @@ public enum Tool: String, CaseIterable, Sendable {
     case ytdlp = "yt-dlp"
     case ffmpeg
     case ffprobe
+    case galleryDL = "gallery-dl"
+
+    var versionArgs: [String] { self == .ytdlp || self == .galleryDL ? ["--version"] : ["-version"] }
+
+    /// Si falta, ¿se puede usar la app igual? (gallery-dl solo se usa como fallback)
+    public var isEssential: Bool { self == .ytdlp }
 }
 
 public struct ToolInfo: Sendable, Equatable {
@@ -46,6 +52,9 @@ public actor ToolManager {
             URL(string: "https://www.osxexperts.net/ffprobe80arm.zip")!,
             URL(string: "https://www.osxexperts.net/ffprobe71arm.zip")!,
         ],
+        .galleryDL: [
+            URL(string: "https://github.com/gdl-org/builds/releases/latest/download/gallery-dl_macos")!,
+        ],
     ]
 
     private let fallbackDirs = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
@@ -78,11 +87,10 @@ public actor ToolManager {
 
     public func info(for tool: Tool) async -> ToolInfo {
         guard let path = path(for: tool) else { return ToolInfo(path: nil, version: nil, managed: false) }
-        let args = tool == .ytdlp ? ["--version"] : ["-version"]
-        let result = await ProcessRunner().run(executable: path, arguments: args)
+        let result = await ProcessRunner().run(executable: path, arguments: tool.versionArgs)
         let firstLine = result.output.split(whereSeparator: \.isNewline).first.map(String.init)
         var version = firstLine
-        if tool != .ytdlp, let line = firstLine {
+        if tool == .ffmpeg || tool == .ffprobe, let line = firstLine {
             // "ffmpeg version 8.0 Copyright..." → "8.0"
             let parts = line.split(separator: " ")
             if parts.count > 2 { version = String(parts[2].split(separator: "-").first ?? parts[2]) }
@@ -167,7 +175,7 @@ public actor ToolManager {
         _ = await ProcessRunner().run(executable: URL(fileURLWithPath: "/usr/bin/xattr"), arguments: ["-d", "com.apple.quarantine", staging.path])
 
         // Verificar que realmente ejecuta antes de reemplazar la copia buena.
-        let check = await ProcessRunner().run(executable: staging, arguments: tool == .ytdlp ? ["--version"] : ["-version"])
+        let check = await ProcessRunner().run(executable: staging, arguments: tool.versionArgs)
         guard check.exitCode == 0 else {
             try? fm.removeItem(at: staging)
             throw URLError(.cannotOpenFile, userInfo: [NSLocalizedDescriptionKey: "El binario descargado no ejecuta"])
@@ -260,11 +268,18 @@ public actor ToolManager {
         return json["tag_name"] as? String
     }
 
-    /// Actualiza si pasó más de un día desde la última vez.
+    /// yt-dlp: si pasó más de un día. gallery-dl: una vez por semana (cambia menos).
     public func updateYtDlpIfStale() async {
-        let last = UserDefaults.standard.double(forKey: lastUpdateKey)
-        guard Date().timeIntervalSince1970 - last > 24 * 3600 else { return }
-        await updateYtDlp(force: true)
+        let now = Date().timeIntervalSince1970
+        if now - UserDefaults.standard.double(forKey: lastUpdateKey) > 24 * 3600 {
+            await updateYtDlp(force: true)
+        }
+        let galleryKey = "grabbyt.lastGalleryDLUpdate"
+        if now - UserDefaults.standard.double(forKey: galleryKey) > 7 * 24 * 3600 {
+            if (try? await install(.galleryDL)) != nil {
+                UserDefaults.standard.set(now, forKey: galleryKey)
+            }
+        }
     }
 
     private func markUpdated() {

@@ -29,14 +29,17 @@ public enum YtDlpArguments {
             "--progress-template", "postprocess:\(postprocessTag)%(progress.postprocessor)s",
         ]
 
+        let h = request.quality == .best ? "" : "[height<=\(request.quality.rawValue)]"
         switch (request.mode, config.mergeFormats) {
-        case (.video, true):
+        case (.video, true), (.images, true):
             // Prioriza H.264/AAC para que el archivo abra en QuickTime/Fotos.
-            args += ["-f", "bv*+ba/b", "-S", "vcodec:h264,res,acodec:m4a", "--merge-output-format", "mp4"]
-        case (.video, false):
-            args += ["-f", "b[ext=mp4]/b"]
+            var sort = "vcodec:h264,res,acodec:m4a"
+            if request.quality != .best { sort = "res:\(request.quality.rawValue)," + sort }
+            args += ["-f", "bv*\(h)+ba/b\(h)/bv*+ba/b", "-S", sort, "--merge-output-format", "mp4"]
+        case (.video, false), (.images, false):
+            args += ["-f", "b[ext=mp4]\(h)/b\(h)/b"]
         case (.audio, true):
-            args += ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--embed-metadata"]
+            args += ["-f", "ba/b", "-x", "--audio-format", request.audioFormat.rawValue, "--audio-quality", "0", "--embed-metadata"]
         case (.audio, false):
             args += ["-f", "ba[ext=m4a]/ba/b"]
         }
@@ -44,6 +47,7 @@ public enum YtDlpArguments {
         if let ffmpegDir { args += ["--ffmpeg-location", ffmpegDir.path] }
         if let browser = config.cookies { args += ["--cookies-from-browser", browser.rawValue] }
         if config.impersonate { args += ["--impersonate", "chrome"] }
+        if config.altClient { args += ["--extractor-args", "youtube:player_client=tv,web_safari,mweb,android_vr"] }
 
         args += ["--", request.url]
         return args

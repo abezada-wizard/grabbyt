@@ -9,14 +9,18 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             ToolsSettings()
                 .tabItem { Label("Herramientas", systemImage: "wrench.and.screwdriver") }
+            IntegrationsSettings()
+                .tabItem { Label("Integraciones", systemImage: "link") }
         }
-        .frame(width: 500, height: 320)
+        .frame(width: 520, height: 420)
     }
 }
 
 private struct GeneralSettings: View {
     @AppStorage("destinationPath") private var destinationPath = DownloadManager.defaultDestination.path
     @AppStorage("preferredBrowser") private var preferredBrowser = ""
+    @AppStorage("maxConcurrent") private var maxConcurrent = 3
+    @AppStorage("showMenuBar") private var showMenuBar = true
 
     var body: some View {
         Form {
@@ -29,6 +33,9 @@ private struct GeneralSettings: View {
                     Button("Cambiar…", action: chooseFolder)
                 }
             }
+
+            Stepper("Descargas simultáneas: \(maxConcurrent)", value: $maxConcurrent, in: 1...6)
+            Toggle("Mostrar en la barra de menú", isOn: $showMenuBar)
 
             Picker("Cookies del navegador", selection: $preferredBrowser) {
                 Text("Automático").tag("")
@@ -96,5 +103,33 @@ private struct ToolsSettings: View {
         }
         .formStyle(.grouped)
         .task { await tools.refresh() }
+    }
+}
+
+private struct IntegrationsSettings: View {
+    static let bookmarklet = "javascript:location.href='grabbyt://download?url='+encodeURIComponent(location.href)"
+
+    var body: some View {
+        Form {
+            Section("Desde el navegador (cualquiera)") {
+                Text("Crea un marcador con esta dirección. Al pulsarlo en una página, Grabbyt la descarga.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text(Self.bookmarklet).font(.caption.monospaced()).lineLimit(2).textSelection(.enabled)
+                    Button("Copiar") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(Self.bookmarklet, forType: .string)
+                    }
+                }
+            }
+            Section("Desde cualquier app") {
+                Text("Selecciona un link → clic derecho → Servicios → “Descargar con Grabbyt”.")
+                Text("También puedes arrastrar links a la ventana, o usar el icono de la barra de menú.")
+            }
+            Section("Atajos / Terminal") {
+                Text("open 'grabbyt://download?url=<link>&mode=audio'").font(.caption.monospaced()).textSelection(.enabled)
+            }
+        }
+        .formStyle(.grouped)
     }
 }

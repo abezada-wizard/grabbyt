@@ -4,6 +4,8 @@ import SwiftUI
 /// Estado de las herramientas para la UI (el trabajo real lo hace el actor ToolManager).
 @MainActor
 final class ToolsModel: ObservableObject {
+    static let shared = ToolsModel()
+    private var bootstrapTask: Task<Void, Never>?
     enum Phase: Equatable {
         case checking
         case installing(String)
@@ -20,7 +22,16 @@ final class ToolsModel: ObservableObject {
 
     var binDirectory: URL { manager.binDir }
 
+    /// Si ya se está preparando (p. ej. la app se abrió desde un link), espera a esa misma preparación.
     func bootstrap() async {
+        if let running = bootstrapTask { return await running.value }
+        let task = Task { await performBootstrap() }
+        bootstrapTask = task
+        await task.value
+        bootstrapTask = nil
+    }
+
+    private func performBootstrap() async {
         phase = .checking
         let missing = await manager.missingTools()
         let hasManagedYtDlp = await manager.managedPath(for: .ytdlp)?.path.contains("yt-dlp-dist") == true

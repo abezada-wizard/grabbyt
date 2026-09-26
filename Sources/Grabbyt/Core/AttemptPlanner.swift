@@ -76,8 +76,20 @@ public enum Browser: String, CaseIterable, Sendable, Identifiable {
     }
 }
 
-public enum MediaMode: String, Sendable, CaseIterable, Identifiable {
-    case video, audio
+public enum MediaMode: String, Sendable, CaseIterable, Identifiable, Codable {
+    case video, audio, images
+    public var id: String { rawValue }
+}
+
+/// Altura máxima del video. `best` = sin límite.
+public enum VideoQuality: Int, Sendable, CaseIterable, Identifiable, Codable {
+    case best = 0, p2160 = 2160, p1440 = 1440, p1080 = 1080, p720 = 720, p480 = 480, p360 = 360
+    public var id: Int { rawValue }
+    public var label: String { self == .best ? "Mejor" : "\(rawValue)p" }
+}
+
+public enum AudioFormat: String, Sendable, CaseIterable, Identifiable, Codable {
+    case mp3, m4a
     public var id: String { rawValue }
 }
 
@@ -86,11 +98,13 @@ public struct AttemptConfig: Hashable, Sendable {
     public var mergeFormats: Bool        // bv*+ba con ffmpeg vs. un solo archivo
     public var cookies: Browser?
     public var impersonate: Bool
+    public var altClient: Bool           // YouTube: otros "player clients" (esquiva bloqueos de bot/formatos)
     public var updateFirst: Bool         // actualizar yt-dlp antes de este intento
     public var waitSeconds: Int          // esperar antes (rate limits / red)
 
-    public init(mergeFormats: Bool, cookies: Browser? = nil, impersonate: Bool = false, updateFirst: Bool = false, waitSeconds: Int = 0) {
+    public init(mergeFormats: Bool, cookies: Browser? = nil, impersonate: Bool = false, altClient: Bool = false, updateFirst: Bool = false, waitSeconds: Int = 0) {
         self.mergeFormats = mergeFormats
+        self.altClient = altClient
         self.cookies = cookies
         self.impersonate = impersonate
         self.updateFirst = updateFirst
@@ -98,12 +112,13 @@ public struct AttemptConfig: Hashable, Sendable {
     }
 
     /// Identidad del intento sin los pasos previos (actualizar/esperar), para no repetir el mismo intento.
-    var signature: String { "\(mergeFormats)|\(cookies?.rawValue ?? "-")|\(impersonate)" }
+    var signature: String { "\(mergeFormats)|\(cookies?.rawValue ?? "-")|\(impersonate)|\(altClient)" }
 
     public var summary: String {
         var parts = [mergeFormats ? "mejor calidad" : "archivo único"]
         if let cookies { parts.append("cookies de \(cookies.displayName)") }
         if impersonate { parts.append("imitando Chrome") }
+        if altClient { parts.append("cliente alternativo") }
         var prefix = ""
         if updateFirst { prefix += "actualizar yt-dlp → " }
         if waitSeconds > 0 { prefix += "esperar \(waitSeconds)s → " }
@@ -116,6 +131,7 @@ public struct AttemptConfig: Hashable, Sendable {
 public struct AttemptPlanner: Sendable {
     public let browsers: [Browser]
     public let maxAttempts: Int
+    public let isYouTube: Bool
     private(set) var tried: Set<String> = []
     private(set) var failedCookieBrowsers: Set<Browser> = []
     private(set) var didUpdate = false
@@ -123,7 +139,8 @@ public struct AttemptPlanner: Sendable {
     public private(set) var attempts = 0
 
     /// - Parameter preferredBrowser: si el usuario eligió uno en Ajustes, va primero.
-    public init(installedBrowsers: [Browser], preferredBrowser: Browser?, maxAttempts: Int = 10) {
+    public init(installedBrowsers: [Browser], preferredBrowser: Browser?, isYouTube: Bool = false, maxAttempts: Int = 10) {
+        self.isYouTube = isYouTube
         var list = installedBrowsers
         if let preferred = preferredBrowser {
             list.removeAll { $0 == preferred }
@@ -162,10 +179,19 @@ public struct AttemptPlanner: Sendable {
     // MARK: - Remedios
 
     enum Remedy {
-        case singleFile, update, cookies, nextCookies, dropCookies, impersonate, wait(Int)
+        case singleFile, update, cookies, nextCookies, dropCookies, impersonate, altClient, wait(Int)
     }
 
     func remedies(for failure: FailureKind) -> [Remedy] {
+        let base = baseRemedies(for: failure)
+        // En YouTube, cambiar de "player client" arregla muchos bloqueos de bot y formatos faltantes.
+        if isYouTube, [.loginRequired, .blocked, .formatUnavailable, .extractorBroken, .unknown, .rateLimited].contains(failure) {
+            return [.altClient] + base
+        }
+        return base
+    }
+
+    func baseRemedies(for failure: FailureKind) -> [Remedy] {
         switch failure {
         case .ffmpegMissing, .formatUnavailable:
             [.singleFile, .update, .impersonate]
@@ -214,6 +240,9 @@ public struct AttemptPlanner: Sendable {
         case .impersonate:
             guard !c.impersonate else { return nil }
             c.impersonate = true
+        case .altClient:
+            guard !c.altClient else { return nil }
+            c.altClient = true
         case .wait(let seconds):
             guard waits < 2 else { return nil }
             waits += 1

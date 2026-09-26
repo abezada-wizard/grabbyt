@@ -105,11 +105,72 @@ struct ParsingTests {
         expect(TwitterFallback.tweetID(from: "https://youtube.com/a/status/7") == nil)
     }
 
+    func testHTMLScraper() {
+        let html = """
+        <html><head><title>Hola &amp; adiós</title>
+        <meta content="https://cdn.x/v.mp4" property="og:video">
+        <meta property="og:image" content="/img/a.jpg">
+        </head><body><video src="https://cdn.x/b.webm"></video>
+        <script>var p = {"hls":"https:\\/\\/cdn.x\\/m\\/master.m3u8?t=1"};</script>
+        <source src="blob:https://x/1"></body></html>
+        """
+        let found = HTMLScraper.parse(html: html, base: URL(string: "https://site.com/p/1")!)
+        expect(found.videos.map(\.absoluteString) == ["https://cdn.x/v.mp4", "https://cdn.x/b.webm", "https://cdn.x/m/master.m3u8?t=1"], "\(found.videos)")
+        expect(found.images.first?.absoluteString == "https://site.com/img/a.jpg")
+        expect(found.title == "Hola & adiós")
+    }
+
+    func testQualitiesAndStages() {
+        let preview = MediaPreview(title: "t", heights: [1080, 720, 360])
+        expect(preview.qualities == [.best, .p1080, .p720, .p360], "\(preview.qualities)")
+        let dest = URL(fileURLWithPath: "/tmp")
+        expect(DownloadEngine.stages(for: DownloadRequest(url: "https://x.com/a/status/1", mode: .video, destination: dest, preferredBrowser: nil)).map(\.rawValue)
+               == ["ytdlp", "twitter", "galleryDL", "direct", "html", "webview"])
+        expect(DownloadEngine.stages(for: DownloadRequest(url: "https://a.com/v.mp4", mode: .video, destination: dest, preferredBrowser: nil)).first == .direct)
+        expect(DownloadEngine.stages(for: DownloadRequest(url: "https://instagram.com/p/x", mode: .images, destination: dest, preferredBrowser: nil)).first == .galleryDL)
+        let args = YtDlpArguments.build(request: DownloadRequest(url: "u", mode: .video, quality: .p720, destination: dest, preferredBrowser: nil),
+                                        config: AttemptConfig(mergeFormats: true), ffmpegDir: nil)
+        expect(args.contains("bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"))
+        let audio = YtDlpArguments.build(request: DownloadRequest(url: "u", mode: .audio, audioFormat: .m4a, destination: dest, preferredBrowser: nil),
+                                         config: AttemptConfig(mergeFormats: true), ffmpegDir: nil)
+        expect(audio.contains("m4a"))
+    }
+
+    func testYouTubeAltClient() {
+        var p = AttemptPlanner(installedBrowsers: [], preferredBrowser: nil, isYouTube: true)
+        let c = p.first(hasFfmpeg: true)
+        let n = p.next(after: .loginRequired, previous: c, canUpdate: true)!
+        expect(n.altClient)
+    }
+
     func testLinkParser() {
         expect(LinkParser.firstURL(in: "mira esto https://x.com/u/status/1?s=20 jaja") == "https://x.com/u/status/1?s=20")
         expect(LinkParser.firstURL(in: "x.com/u/status/1") == "https://x.com/u/status/1")
         expect(LinkParser.firstURL(in: "hola") == nil)
     }
+}
+
+// `swift run SelfTest probe <url>`: vista previa.
+if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "probe" {
+    print(await MediaProbe.probe(CommandLine.arguments[2]).map { "\($0)" } ?? "sin vista previa")
+    exit(0)
+}
+
+// `swift run SelfTest sniff <url>`: navegador invisible.
+if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "sniff", let url = URL(string: CommandLine.arguments[2]) {
+    let result = await WebSniffer.sniff(url)
+    print("título:", result.title ?? "-")
+    result.media.forEach { print(" ·", $0.absoluteString) }
+    exit(0)
+}
+
+// `swift run SelfTest html <url>`: lectura del HTML.
+if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "html", let url = URL(string: CommandLine.arguments[2]) {
+    let found = try await HTMLScraper.scrape(url)
+    print("título:", found.title ?? "-")
+    found.videos.forEach { print(" video ·", $0.absoluteString) }
+    found.images.prefix(5).forEach { print(" imagen ·", $0.absoluteString) }
+    exit(0)
 }
 
 // `swift run SelfTest fx <url> [audio]`: prueba solo el fallback de fxtwitter.
@@ -127,7 +188,7 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "fx", let id = 
 // `swift run SelfTest download <url> [audio]`: prueba real del motor completo (instala herramientas si faltan).
 if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "download" {
     let url = CommandLine.arguments[2]
-    let mode: MediaMode = CommandLine.arguments.dropFirst(3).first == "audio" ? .audio : .video
+    let mode = CommandLine.arguments.dropFirst(3).first.flatMap(MediaMode.init(rawValue:)) ?? .video
     let dest = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("grabbyt-test")
     let tools = ToolManager.shared
     do {
@@ -159,5 +220,8 @@ AttemptPlannerTests().testAlwaysTerminates()
 ParsingTests().testProgressLine()
 ParsingTests().testLinkParser()
 ParsingTests().testTweetID()
+ParsingTests().testHTMLScraper()
+ParsingTests().testQualitiesAndStages()
+ParsingTests().testYouTubeAltClient()
 print(failures == 0 ? "✔ \(checks) comprobaciones OK" : "✘ \(failures)/\(checks) fallaron")
 exit(failures == 0 ? 0 : 1)
